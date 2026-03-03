@@ -3,7 +3,6 @@ package v20260301
 import (
 	"bytes"
 	"context"
-	"errors"
 
 	"github.com/Azure/AKSFlexNode/components/kubelet"
 	"github.com/Azure/AKSFlexNode/pkg/config"
@@ -13,21 +12,6 @@ import (
 func (s *startKubeletServiceAction) ensureSystemdUnit(
 	ctx context.Context,
 	needsRestart bool,
-	spec *kubelet.StartKubeletServiceSpec,
-) error {
-	_, err := s.systemd.GetUnitStatus(ctx, systemdUnitKubelet)
-	switch {
-	case errors.Is(err, systemd.ErrUnitNotFound):
-		return s.createSystemdUnit(ctx, spec)
-	case err != nil:
-		return err
-	default:
-		return s.updateSystemdUnit(ctx, needsRestart)
-	}
-}
-
-func (s *startKubeletServiceAction) createSystemdUnit(
-	ctx context.Context,
 	spec *kubelet.StartKubeletServiceSpec,
 ) error {
 	kubeletConfig := spec.GetKubeletConfig()
@@ -64,29 +48,10 @@ func (s *startKubeletServiceAction) createSystemdUnit(
 		return err
 	}
 
-	if err := s.systemd.WriteUnitFile(ctx, systemdUnitKubelet, b.Bytes()); err != nil {
+	unitUpdated, err := s.systemd.EnsureUnitFile(ctx, systemdUnitKubelet, b.Bytes())
+	if err != nil {
 		return err
 	}
 
-	if err := s.systemd.DaemonReload(ctx); err != nil {
-		return err
-	}
-
-	if err := s.systemd.StartUnit(ctx, systemdUnitKubelet); err != nil {
-		return err
-	}
-
-	return nil
-}
-
-func (s *startKubeletServiceAction) updateSystemdUnit(ctx context.Context, restart bool) error {
-	// TODO: should we allow updating kubelet.service?
-
-	if restart {
-		if err := s.systemd.ReloadOrRestartUnit(ctx, systemdUnitKubelet); err != nil {
-			return err
-		}
-	}
-
-	return nil
+	return systemd.EnsureUnitRunning(ctx, s.systemd, systemdUnitKubelet, unitUpdated, needsRestart || unitUpdated)
 }
