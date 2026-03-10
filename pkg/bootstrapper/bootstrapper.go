@@ -64,6 +64,8 @@ func (b *Bootstrapper) Bootstrap(ctx context.Context) (*ExecutionResult, error) 
 // Unbootstrap executes all cleanup steps sequentially (in reverse order of bootstrap)
 func (b *Bootstrapper) Unbootstrap(ctx context.Context) (*ExecutionResult, error) {
 	steps := []Executor{
+		resetKubelet.Executor("reset-kubelet", b.componentsAPIConn),
+		resetContainerdService.Executor("reset-containerd", b.componentsAPIConn),
 		arc.NewUnInstaller(b.logger), // Uninstall Arc (after cleanup)
 	}
 

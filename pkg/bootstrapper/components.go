@@ -158,6 +158,18 @@ var startContainerdService resolveActionFunc[*cri.StartContainerdService] = func
 	}.Build(), nil
 }
 
+var resetContainerdService resolveActionFunc[*cri.ResetContainerdService] = func(
+	name string,
+	cfg *config.Config,
+) (*cri.ResetContainerdService, error) {
+	spec := cri.ResetContainerdServiceSpec_builder{}.Build()
+
+	return cri.ResetContainerdService_builder{
+		Metadata: componentAction(name),
+		Spec:     spec,
+	}.Build(), nil
+}
+
 var downloadKubeBinaries resolveActionFunc[*kubebins.DownloadKubeBinaries] = func(
 	name string,
 	cfg *config.Config,
@@ -289,6 +301,16 @@ var startKubelet resolveActionFunc[*kubelet.StartKubeletService] = func(
 	return kubelet.StartKubeletService_builder{
 		Metadata: componentAction(name),
 		Spec:     spec,
+	}.Build(), nil
+}
+
+var resetKubelet resolveActionFunc[*kubelet.ResetKubelet] = func(
+	name string,
+	cfg *config.Config,
+) (*kubelet.ResetKubelet, error) {
+	return kubelet.ResetKubelet_builder{
+		Metadata: componentAction(name),
+		Spec:     kubelet.ResetKubeletSpec_builder{}.Build(),
 	}.Build(), nil
 }
 

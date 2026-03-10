@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # =============================================================================
-# hack/e2e/lib/node-join-token.sh - Join an AKS flex node using bootstrap token auth
+# hack/e2e/lib/node-join-token.sh - Join / unjoin an AKS flex node using
+#                                    bootstrap token auth
 #
 # Functions:
-#   node_join_token  - Create bootstrap token/RBAC, deploy binary, run agent
+#   node_join_token   - Create bootstrap token/RBAC, deploy binary, run agent
+#   node_unjoin_token - Stop agent, run unbootstrap, delete node from cluster
 # =============================================================================
 set -euo pipefail
 
@@ -155,4 +157,43 @@ EOF
   _deploy_and_start_agent "${vm_ip}" "${config_file}" "aks-flex-node-token"
 
   log_success "Token node joined in $(timer_elapsed "${start}")s"
+}
+
+# ---------------------------------------------------------------------------
+# node_unjoin_token - Stop the agent, run unbootstrap, remove node from cluster
+# ---------------------------------------------------------------------------
+node_unjoin_token() {
+  log_section "Unjoining Token Node"
+  local start
+  start=$(timer_start)
+
+  local vm_ip vm_name
+  vm_ip="$(state_get token_vm_ip)"
+  vm_name="$(state_get token_vm_name)"
+
+  # Step 1: Stop the agent service and run unbootstrap on the VM.
+  # The unbootstrap command runs best-effort: ResetKubelet, ResetContainerdService,
+  # and ArcUnbootstrap (no-op since Arc is disabled for token auth). It does not
+  # delete the node object.
+  log_info "Stopping agent and running unbootstrap on ${vm_ip}..."
+  remote_exec "${vm_ip}" 'bash -s' <<'REMOTE'
+set -euo pipefail
+
+sudo systemctl stop aks-flex-node-token 2>/dev/null || true
+
+sudo /usr/local/bin/aks-flex-node unbootstrap --config /etc/aks-flex-node/config.json \
+  2>&1 | sudo tee -a /var/log/aks-flex-node/aks-flex-node.log
+
+echo "kubelet status after unbootstrap:"
+systemctl is-active kubelet 2>&1 || true
+echo "containerd status after unbootstrap:"
+systemctl is-active containerd 2>&1 || true
+REMOTE
+
+  # Step 2: Delete the node object from the API server so validation passes
+  # without waiting for the node controller to evict it.
+  log_info "Deleting node '${vm_name}' from cluster..."
+  kubectl delete node "${vm_name}" --ignore-not-found --wait=false
+
+  log_success "Token node unjoined in $(timer_elapsed "${start}")s"
 }
