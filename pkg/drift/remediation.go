@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"sync/atomic"
 	"time"
 
@@ -12,11 +13,20 @@ import (
 
 	"github.com/Azure/AKSFlexNode/pkg/bootstrapper"
 	"github.com/Azure/AKSFlexNode/pkg/config"
+	"github.com/Azure/AKSFlexNode/pkg/kube"
 	"github.com/Azure/AKSFlexNode/pkg/spec"
 	"github.com/Azure/AKSFlexNode/pkg/status"
 )
 
 const driftKubernetesUpgradeOperation = "drift-kubernetes-upgrade"
+
+const (
+	upgradeStepCordonAndDrain       = "cordon-and-drain"
+	upgradeStepStopKubelet          = "stop-kubelet"
+	upgradeStepDownloadKubeBinaries = "download-kube-binaries"
+	upgradeStepStartKubelet         = "start-kubelet"
+	upgradeStepUncordon             = "uncordon"
+)
 
 // maxManagedClusterSpecAge is a safety guard to avoid acting on very stale spec snapshots.
 // In normal operation we run drift immediately after a successful spec collection, so this
@@ -121,13 +131,26 @@ func detectAndRemediate(
 	case RemediationActionKubernetesUpgrade:
 		result, upgradeErr := runKubernetesUpgradeRemediation(ctx, cfg, logger, conn)
 		if upgradeErr != nil {
-			status.MarkKubeletUnhealthyBestEffort(logger)
+			if shouldMarkKubeletUnhealthyAfterUpgradeFailure(result, upgradeErr) {
+				status.MarkKubeletUnhealthyBestEffort(logger)
+			}
 			return fmt.Errorf("kubernetes upgrade remediation failed: %w", upgradeErr)
 		}
 		if err := handleExecutionResult(result, driftKubernetesUpgradeOperation, logger); err != nil {
-			status.MarkKubeletUnhealthyBestEffort(logger)
+			if shouldMarkKubeletUnhealthyAfterUpgradeFailure(result, err) {
+				status.MarkKubeletUnhealthyBestEffort(logger)
+			}
 			return fmt.Errorf("kubernetes upgrade remediation execution failed: %w", err)
 		}
+		// Best-effort: reflect the successful upgrade immediately in the status snapshot so
+		// subsequent health checks don't rely solely on the periodic status collector.
+		// Also invalidate any cached kubelet clientset so readiness checks pick up rotated kubeconfig/certs.
+		kube.InvalidateKubeletClientset()
+		kubeletVersion := plan.DesiredKubernetesVersion
+		if kubeletVersion == "" && cfg != nil {
+			kubeletVersion = cfg.Kubernetes.Version
+		}
+		status.MarkKubeletHealthyAfterUpgradeBestEffort(logger, kubeletVersion)
 		logger.Info("Kubernetes upgrade remediation completed successfully")
 		return detectErr
 
@@ -212,17 +235,36 @@ func runKubernetesUpgradeRemediation(
 		return nil, errors.New("components API connection is required")
 	}
 
+	// For kubelet upgrades we cordon+drain the node first to minimize disruption.
+	// We only uncordon if we cordoned the node in this remediation run.
+	nodeOps := newKubeNodeMaintenance(cfg, logger)
+	cordonState := &cordonDrainState{}
+
 	steps := []bootstrapper.Executor{
+		newCordonAndDrainExecutor(upgradeStepCordonAndDrain, logger, nodeOps, cordonState),
 		// Stop/disable kubelet around the upgrade so we don't run kubelet against partially-updated bits.
-		bootstrapper.StopKubeletExecutor("stop-kubelet", conn, cfg),
+		bootstrapper.StopKubeletExecutor(upgradeStepStopKubelet, conn, cfg),
 		// Install the desired kube binaries version.
-		bootstrapper.DownloadKubeBinariesExecutor("download-kube-binaries", conn, cfg),
+		bootstrapper.DownloadKubeBinariesExecutor(upgradeStepDownloadKubeBinaries, conn, cfg),
 		// Reconfigure + start kubelet to match the upgraded bits.
-		bootstrapper.StartKubeletExecutor("start-kubelet", conn, cfg),
+		bootstrapper.StartKubeletExecutor(upgradeStepStartKubelet, conn, cfg),
+		newUncordonExecutor(upgradeStepUncordon, logger, nodeOps, cordonState),
 	}
 
 	be := bootstrapper.NewBaseExecutor(cfg, logger)
-	return be.ExecuteSteps(ctx, steps, driftKubernetesUpgradeOperation)
+	result, err := be.ExecuteSteps(ctx, steps, driftKubernetesUpgradeOperation)
+	if err != nil && logger != nil {
+		// Special-case: if the only thing that failed was uncordon, best-effort retry so the
+		// node doesn't remain stuck unschedulable after a successful upgrade.
+		if failedStepName(result) == upgradeStepUncordon {
+			nodeName, hnErr := os.Hostname()
+			if hnErr == nil && cordonState.shouldUncordon(nodeName) {
+				logger.WithError(err).Warnf("Upgrade remediation failed at uncordon; retrying uncordon best-effort for node %s", nodeName)
+				_ = nodeOps.Uncordon(ctx, nodeName)
+			}
+		}
+	}
+	return result, err
 }
 
 // handleExecutionResult mirrors main's handleExecutionResult but lives in drift so remediation
@@ -239,4 +281,34 @@ func handleExecutionResult(result *bootstrapper.ExecutionResult, operation strin
 	}
 
 	return fmt.Errorf("%s failed: %s", operation, result.Error)
+}
+
+func failedStepName(result *bootstrapper.ExecutionResult) string {
+	if result == nil {
+		return ""
+	}
+	for _, sr := range result.StepResults {
+		if !sr.Success {
+			return sr.StepName
+		}
+	}
+	return ""
+}
+
+func shouldMarkKubeletUnhealthyAfterUpgradeFailure(result *bootstrapper.ExecutionResult, upgradeErr error) bool {
+	if upgradeErr == nil {
+		return false
+	}
+	// Only mark kubelet unhealthy when the failure indicates kubelet/binaries are likely in a bad state.
+	// Cordon/drain failures are generally control-plane/RBAC/timeouts, and uncordon failures do not
+	// imply kubelet is unhealthy.
+	switch failedStepName(result) {
+	case upgradeStepCordonAndDrain, upgradeStepUncordon:
+		return false
+	case upgradeStepStopKubelet, upgradeStepDownloadKubeBinaries, upgradeStepStartKubelet:
+		return true
+	default:
+		// Unknown step; avoid unnecessary auto-bootstrap unless we can positively identify a kubelet/binary issue.
+		return false
+	}
 }
