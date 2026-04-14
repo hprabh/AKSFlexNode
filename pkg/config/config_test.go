@@ -1102,9 +1102,9 @@ func TestLoadConfigWithDottedLabels(t *testing.T) {
 				}
 			}`,
 			expectedLabels: map[string]string{
-				"kubernetes.io/nodeready":           "true",
-				"node.kubernetes.io/instance-type":  "Standard_D2s_v3",
-				"kubernetes.azure.com/managed":      "false", // default label
+				"kubernetes.io/nodeready":          "true",
+				"node.kubernetes.io/instance-type": "Standard_D2s_v3",
+				"kubernetes.azure.com/managed":     "false", // default label
 			},
 		},
 		{
@@ -1163,10 +1163,10 @@ func TestLoadConfigWithDottedLabels(t *testing.T) {
 				}
 			}`,
 			expectedLabels: map[string]string{
-				"env":                              "staging",
-				"topology.kubernetes.io/zone":      "eastus-1",
-				"disktype":                         "ssd",
-				"kubernetes.azure.com/managed":     "false",
+				"env":                          "staging",
+				"topology.kubernetes.io/zone":  "eastus-1",
+				"disktype":                     "ssd",
+				"kubernetes.azure.com/managed": "false",
 			},
 		},
 	}
@@ -1176,7 +1176,7 @@ func TestLoadConfigWithDottedLabels(t *testing.T) {
 			t.Parallel()
 
 			configFile := filepath.Join(t.TempDir(), "config.json")
-			if err := os.WriteFile(configFile, []byte(tt.configJSON), 0o644); err != nil {
+			if err := os.WriteFile(configFile, []byte(tt.configJSON), 0o600); err != nil {
 				t.Fatalf("Failed to write test config file: %v", err)
 			}
 
