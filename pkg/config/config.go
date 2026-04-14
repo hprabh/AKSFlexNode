@@ -48,8 +48,10 @@ func LoadConfig(configPath string) (*Config, error) {
 		return nil, fmt.Errorf("config file path is required")
 	}
 
-	// Set up viper
-	v := viper.New()
+	// Use a custom key delimiter to avoid conflicts with dots in map keys.
+	// Kubernetes labels (e.g. "kubernetes.io/nodeReady") contain dots that
+	// viper's default "." delimiter would misinterpret as nested keys.
+	v := viper.NewWithOptions(viper.KeyDelimiter("::"))
 	v.SetConfigType("json")
 	v.AutomaticEnv()
 	v.SetEnvPrefix(envPrefix)
@@ -69,7 +71,7 @@ func LoadConfig(configPath string) (*Config, error) {
 	// Track if managedIdentity was explicitly set in config
 	// This is necessary because viper unmarshals empty JSON objects {} as nil pointers
 	// Using viper.IsSet() correctly detects if the key was present in the config file
-	config.isMIExplicitlySet = v.IsSet("azure.managedIdentity")
+	config.isMIExplicitlySet = v.IsSet("azure::managedIdentity")
 
 	// Set defaults for any missing values
 	config.SetDefaults()

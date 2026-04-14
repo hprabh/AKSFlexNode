@@ -1069,6 +1069,151 @@ func TestAuthenticationMethodValidation(t *testing.T) {
 	}
 }
 
+func TestLoadConfigWithDottedLabels(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name           string
+		configJSON     string
+		expectedLabels map[string]string
+	}{
+		{
+			name: "labels with dotted keys are preserved",
+			configJSON: `{
+				"azure": {
+					"subscriptionId": "12345678-1234-1234-1234-123456789012",
+					"tenantId": "12345678-1234-1234-1234-123456789012",
+					"cloud": "AzurePublicCloud",
+					"bootstrapToken": { "token": "abcdef.0123456789abcdef" },
+					"targetCluster": {
+						"resourceId": "/subscriptions/12345678-1234-1234-1234-123456789012/resourceGroups/test-rg/providers/Microsoft.ContainerService/managedClusters/test-cluster",
+						"location": "eastus"
+					}
+				},
+				"node": {
+					"labels": {
+						"kubernetes.io/nodeReady": "true",
+						"node.kubernetes.io/instance-type": "Standard_D2s_v3"
+					},
+					"kubelet": {
+						"serverURL": "https://test-cluster.hcp.eastus.azmk8s.io:443",
+						"caCertData": "LS0tLS1CRUdJTi1DRVJUSUZJQ0FURS0tLS0t"
+					}
+				}
+			}`,
+			expectedLabels: map[string]string{
+				"kubernetes.io/nodeready":           "true",
+				"node.kubernetes.io/instance-type":  "Standard_D2s_v3",
+				"kubernetes.azure.com/managed":      "false", // default label
+			},
+		},
+		{
+			name: "labels without dots still work",
+			configJSON: `{
+				"azure": {
+					"subscriptionId": "12345678-1234-1234-1234-123456789012",
+					"tenantId": "12345678-1234-1234-1234-123456789012",
+					"cloud": "AzurePublicCloud",
+					"bootstrapToken": { "token": "abcdef.0123456789abcdef" },
+					"targetCluster": {
+						"resourceId": "/subscriptions/12345678-1234-1234-1234-123456789012/resourceGroups/test-rg/providers/Microsoft.ContainerService/managedClusters/test-cluster",
+						"location": "eastus"
+					}
+				},
+				"node": {
+					"labels": {
+						"env": "production",
+						"team": "platform"
+					},
+					"kubelet": {
+						"serverURL": "https://test-cluster.hcp.eastus.azmk8s.io:443",
+						"caCertData": "LS0tLS1CRUdJTi1DRVJUSUZJQ0FURS0tLS0t"
+					}
+				}
+			}`,
+			expectedLabels: map[string]string{
+				"env":                          "production",
+				"team":                         "platform",
+				"kubernetes.azure.com/managed": "false",
+			},
+		},
+		{
+			name: "mixed dotted and simple labels",
+			configJSON: `{
+				"azure": {
+					"subscriptionId": "12345678-1234-1234-1234-123456789012",
+					"tenantId": "12345678-1234-1234-1234-123456789012",
+					"cloud": "AzurePublicCloud",
+					"bootstrapToken": { "token": "abcdef.0123456789abcdef" },
+					"targetCluster": {
+						"resourceId": "/subscriptions/12345678-1234-1234-1234-123456789012/resourceGroups/test-rg/providers/Microsoft.ContainerService/managedClusters/test-cluster",
+						"location": "eastus"
+					}
+				},
+				"node": {
+					"labels": {
+						"env": "staging",
+						"topology.kubernetes.io/zone": "eastus-1",
+						"disktype": "ssd"
+					},
+					"kubelet": {
+						"serverURL": "https://test-cluster.hcp.eastus.azmk8s.io:443",
+						"caCertData": "LS0tLS1CRUdJTi1DRVJUSUZJQ0FURS0tLS0t"
+					}
+				}
+			}`,
+			expectedLabels: map[string]string{
+				"env":                              "staging",
+				"topology.kubernetes.io/zone":      "eastus-1",
+				"disktype":                         "ssd",
+				"kubernetes.azure.com/managed":     "false",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			configFile := filepath.Join(t.TempDir(), "config.json")
+			if err := os.WriteFile(configFile, []byte(tt.configJSON), 0o644); err != nil {
+				t.Fatalf("Failed to write test config file: %v", err)
+			}
+
+			config, err := LoadConfig(configFile)
+			if err != nil {
+				t.Fatalf("LoadConfig() unexpected error: %v", err)
+			}
+
+			// Verify all expected labels are present with correct values
+			for key, expectedVal := range tt.expectedLabels {
+				gotVal, ok := config.Node.Labels[key]
+				if !ok {
+					t.Errorf("expected label %q not found in config.Node.Labels (got keys: %v)", key, labelKeys(config.Node.Labels))
+				} else if gotVal != expectedVal {
+					t.Errorf("label %q = %q, want %q", key, gotVal, expectedVal)
+				}
+			}
+
+			// Verify no unexpected labels
+			for key := range config.Node.Labels {
+				if _, ok := tt.expectedLabels[key]; !ok {
+					t.Errorf("unexpected label %q = %q", key, config.Node.Labels[key])
+				}
+			}
+		})
+	}
+}
+
+// labelKeys returns the keys of a map for diagnostic output.
+func labelKeys(m map[string]string) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	return keys
+}
+
 func TestIsBootstrapTokenConfigured(t *testing.T) {
 	tests := []struct {
 		name     string
